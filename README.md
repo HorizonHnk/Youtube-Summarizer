@@ -1094,7 +1094,7 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 
 ## 👨‍💻 Developer
 
-**Ngoy Henock Mukonkole**
+**Horizon Hnk**
 - 📧 **Email**: [hhnk3693@gmail.com](mailto:hhnk3693@gmail.com)
 - 🐙 **GitHub**: [HorizonHnk](https://github.com/HorizonHnk)
 - 📺 **YouTube**: [Development Tutorials](https://www.youtube.com/playlist?list=PLrZbkNpNVSwwEIPRtoMxEy14_2DFuMM8k)
