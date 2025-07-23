@@ -1122,7 +1122,6 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 - **Database**: Firebase Firestore
 - **Deployment**: Netlify + Railway
 - **License**: MIT
-- **Development Time**: 3+ months
 - **Features**: 15+ core functionalities
 - **Code Quality**: ESLint + Prettier
 - **Testing**: Jest + React Testing Library
