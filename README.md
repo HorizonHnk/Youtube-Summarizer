@@ -1133,7 +1133,7 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 
 ### 🌟 Star this repository if you found it helpful! 🌟
 
-**Built with ❤️ by [Ngoy Henock Mukonkole](https://github.com/HorizonHnk)**
+**Built with ❤️ by [Horizon Hnk](https://github.com/HorizonHnk)**
 
 [🔗 Repository](https://github.com/HorizonHnk/Youtube-Summarizer.git) • [🌐 Live Demo](https://youtube-summarization.netlify.app/) • [📧 Contact](mailto:hhnk3693@gmail.com)
 
