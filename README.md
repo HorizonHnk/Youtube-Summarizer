@@ -71,6 +71,784 @@ A modern, full-stack web application that leverages Google's Gemini AI and YouTu
 - **Concurrently** - Run multiple npm scripts
 - **Axios** - HTTP client for API requests
 
+## 🏗️ Code Architecture & Technical Details
+
+### **Project Structure**
+```
+YouTube-Summarizer/
+├── 📁 backend/                    # Node.js Express Server
+│   ├── 📄 server.js              # Main server file with API routes
+│   ├── 📄 package.json           # Backend dependencies
+│   └── 📄 .env                   # Environment variables
+├── 📁 src/                       # React Frontend Source
+│   ├── 📁 components/            # Reusable UI Components
+│   │   ├── 📁 common/           # Shared components
+│   │   │   └── 📄 Button.jsx     # Responsive button component
+│   │   ├── 📁 ui/               # UI utility components
+│   │   │   ├── 📄 LoadingSpinner.jsx
+│   │   │   └── 📄 StatusBadge.jsx
+│   │   ├── 📄 YouTubeSummarizer.jsx  # Main analysis component
+│   │   ├── 📄 Login.jsx          # Authentication form
+│   │   ├── 📄 Signup.jsx         # User registration
+│   │   ├── 📄 Welcome.jsx        # Landing page
+│   │   ├── 📄 ErrorBoundary.jsx  # Error handling wrapper
+│   │   └── 📄 LoadingScreen.jsx  # App initialization screen
+│   ├── 📁 contexts/              # React Context Providers
+│   │   └── 📄 AuthContext.jsx    # Authentication state management
+│   ├── 📁 services/              # API Integration Layer
+│   │   ├── 📄 gemini.js          # Gemini AI service with retry logic
+│   │   └── 📄 api.js             # HTTP client configuration
+│   ├── 📁 hooks/                 # Custom React Hooks
+│   │   ├── 📄 useForm.js         # Form validation hook
+│   │   ├── 📄 useLocalStorage.js # Local storage management
+│   │   └── 📄 useResponsive.js   # Responsive design hook
+│   ├── 📁 firebase/              # Firebase Configuration
+│   │   └── 📄 config.js          # Firebase initialization
+│   ├── 📁 utils/                 # Utility Functions
+│   │   └── 📄 responsive.js      # Responsive design utilities
+│   └── 📁 styles/                # Global Styles
+│       └── 📄 globals.css        # CSS variables and utilities
+├── 📄 package.json               # Frontend dependencies
+├── 📄 vite.config.js             # Vite build configuration
+├── 📄 tailwind.config.js         # Tailwind CSS customization
+└── 📄 eslint.config.js           # ESLint configuration
+```
+
+### **Backend Architecture (`server.js`)**
+
+#### **Express Server Setup**
+```javascript
+const express = require('express')
+const cors = require('cors')
+const { GoogleGenerativeAI } = require('@google/generative-ai')
+
+const app = express()
+const PORT = process.env.PORT || 5000
+
+// Middleware configuration
+app.use(cors())
+app.use(express.json())
+
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+```
+
+#### **YouTube Video ID Extraction**
+```javascript
+// Robust URL parsing for various YouTube formats
+function extractVideoId(url) {
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/
+  const match = url.match(regExp)
+  return (match && match[2].length === 11) ? match[2] : null
+}
+```
+
+#### **Enhanced Video Metadata Fetching**
+```javascript
+async function getVideoMetadata(videoId) {
+  try {
+    const response = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
+      params: {
+        part: 'snippet,statistics,contentDetails',
+        id: videoId,
+        key: YOUTUBE_API_KEY
+      }
+    })
+
+    const video = response.data.items[0]
+    return {
+      title: video.snippet.title,
+      description: video.snippet.description || '',
+      channelTitle: video.snippet.channelTitle,
+      publishedAt: video.snippet.publishedAt,
+      viewCount: video.statistics.viewCount,
+      likeCount: video.statistics.likeCount,
+      duration: video.contentDetails.duration,
+      thumbnails: video.snippet.thumbnails
+    }
+  } catch (error) {
+    throw new Error(`Failed to fetch video metadata: ${error.message}`)
+  }
+}
+```
+
+#### **Advanced Caption Processing**
+```javascript
+async function getVideoTranscript(videoId) {
+  try {
+    // Method 1: Official YouTube Captions API
+    const availableCaptions = await getAvailableCaptions(videoId)
+    
+    if (availableCaptions.length > 0) {
+      const preferredCaption = availableCaptions.find(cap => !cap.isAutoSynced) || availableCaptions[0]
+      const captionContent = await downloadCaptionContent(preferredCaption.id)
+      return {
+        content: parseSRTContent(captionContent),
+        source: 'youtube_api',
+        language: preferredCaption.language,
+        isAutoGenerated: preferredCaption.isAutoSynced
+      }
+    }
+
+    // Method 2: Fallback to youtube-transcript library
+    const { YoutubeTranscript } = require('youtube-transcript')
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId)
+    return {
+      content: transcript.map(item => item.text).join(' '),
+      source: 'youtube_transcript_library'
+    }
+  } catch (error) {
+    return null
+  }
+}
+```
+
+#### **AI Analysis with Smart Retry**
+```javascript
+app.post('/api/summarize', async (req, res) => {
+  try {
+    const { youtube_link, model, additional_prompt } = req.body
+    const videoId = extractVideoId(youtube_link)
+    
+    // Parallel data fetching for optimal performance
+    const [metadata, transcriptData] = await Promise.all([
+      getVideoMetadata(videoId),
+      getVideoTranscript(videoId)
+    ])
+
+    // Comprehensive AI prompt construction
+    const prompt = buildAnalysisPrompt(metadata, transcriptData, additional_prompt)
+    
+    // Generate analysis with retry logic
+    const genModel = genAI.getGenerativeModel({ model: model || "gemini-1.5-flash" })
+    const result = await genModel.generateContent(prompt)
+    const summary = cleanFormatting(result.response.text())
+
+    res.json({
+      success: true,
+      summary,
+      video_metadata: metadata,
+      transcript_info: transcriptData,
+      analysis_quality: {
+        has_metadata: !!metadata.title,
+        has_transcript: !!transcriptData,
+        content_richness: transcriptData ? 'High' : 'Medium'
+      }
+    })
+  } catch (error) {
+    handleAPIError(error, res)
+  }
+})
+```
+
+### **Frontend Architecture**
+
+#### **Authentication Context (`AuthContext.jsx`)**
+```javascript
+export function AuthProvider({ children }) {
+  const [currentUser, setCurrentUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  // Firebase auth state monitoring
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (user) => {
+        setCurrentUser(user)
+        setLoading(false)
+        if (user) setError('')
+      },
+      (error) => {
+        setError(`Authentication error: ${error.message}`)
+        setLoading(false)
+      }
+    )
+    return unsubscribe
+  }, [])
+
+  // Authentication methods with error handling
+  async function login(email, password) {
+    try {
+      setError('')
+      setLoading(true)
+      const result = await signInWithEmailAndPassword(auth, email, password)
+      return result.user
+    } catch (error) {
+      const errorMessage = getFirebaseErrorMessage(error.code)
+      setError(errorMessage)
+      throw new Error(errorMessage)
+    } finally {
+      setLoading(false)
+    }
+  }
+}
+```
+
+#### **Main Application Component (`YouTubeSummarizer.jsx`)**
+```javascript
+const YouTubeSummarizer = () => {
+  // State management with hooks
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisResult, setAnalysisResult] = useState(null)
+  const [chatHistory, setChatHistory] = useState([])
+  const [activeTab, setActiveTab] = useState('input')
+  const [apiStatus, setApiStatus] = useState({})
+
+  // Enhanced video analysis with error handling
+  const analyzeVideo = async (url) => {
+    setIsAnalyzing(true)
+    setError('')
+    
+    try {
+      const result = await analyzeYouTubeVideo(url)
+      setAnalysisResult(result)
+      setVideoInfo(extractVideoInfo(result))
+      setActiveTab('summary')
+      setChatHistory([])
+    } catch (error) {
+      setError(getErrorMessage(error))
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
+  // Interactive chat functionality
+  const askQuestion = async (question) => {
+    const userMessage = createMessage('user', question)
+    setChatHistory(prev => [...prev, userMessage])
+    
+    try {
+      const response = await askQuestionAboutVideo(
+        analysisResult.context_id, 
+        question, 
+        chatHistory
+      )
+      const aiMessage = createMessage('assistant', response.answer)
+      setChatHistory(prev => [...prev, aiMessage])
+    } catch (error) {
+      const errorMessage = createMessage('error', `Sorry, I couldn't process your question: ${error.message}`)
+      setChatHistory(prev => [...prev, errorMessage])
+    }
+  }
+}
+```
+
+#### **Advanced Gemini Service (`gemini.js`)**
+```javascript
+// Analysis cache for chat context and downloads
+const analysisCache = new Map()
+
+// Smart retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelay: 2000,
+  maxDelay: 10000,
+  backoffMultiplier: 2
+}
+
+// Exponential backoff retry logic
+const retryWithBackoff = async (fn, retries = 0) => {
+  try {
+    return await fn()
+  } catch (error) {
+    const isRetryable = error.message.includes('overloaded') || 
+                       error.message.includes('503') ||
+                       error.message.includes('429')
+    
+    if (retries < RETRY_CONFIG.maxRetries && isRetryable) {
+      const delay = Math.min(
+        RETRY_CONFIG.baseDelay * Math.pow(RETRY_CONFIG.backoffMultiplier, retries),
+        RETRY_CONFIG.maxDelay
+      )
+      
+      await sleep(delay)
+      return retryWithBackoff(fn, retries + 1)
+    }
+    throw error
+  }
+}
+
+// Enhanced video analysis with backend integration
+export const analyzeYouTubeVideo = async (videoUrl) => {
+  const videoId = extractVideoId(videoUrl)
+  if (!videoId) throw new Error('Invalid YouTube URL')
+
+  // Health check before analysis
+  const healthCheck = await checkBackendHealth()
+  if (!healthCheck.available) {
+    throw new Error(`Backend server is not available: ${healthCheck.error}`)
+  }
+
+  // Backend analysis with retry logic
+  const analyzeWithBackend = async () => {
+    const response = await fetch(`${BACKEND_URL}/api/summarize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        youtube_link: videoUrl,
+        model: 'gemini-1.5-flash',
+        additional_prompt: 'Please provide comprehensive analysis'
+      })
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+      throw new Error(errorData.details || errorData.error)
+    }
+
+    return await response.json()
+  }
+
+  const backendResult = await retryWithBackoff(analyzeWithBackend)
+  
+  // Transform and cache results
+  const analysisResult = transformBackendResponse(backendResult, videoId, videoUrl)
+  analysisCache.set(analysisResult.context_id, analysisResult)
+  
+  return analysisResult
+}
+```
+
+#### **Responsive Design System (`useResponsive.js`)**
+```javascript
+const useResponsive = () => {
+  const [screenSize, setScreenSize] = useState(() => {
+    if (typeof window === 'undefined') return 'lg'
+    return getScreenSize(window.innerWidth)
+  })
+  
+  const [windowSize, setWindowSize] = useState(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1024,
+    height: typeof window !== 'undefined' ? window.innerHeight : 768
+  }))
+
+  // Optimized resize handler with debouncing
+  const handleResize = useCallback(() => {
+    const width = window.innerWidth
+    const height = window.innerHeight
+    
+    setWindowSize({ width, height })
+    setScreenSize(getScreenSize(width))
+  }, [])
+
+  // Responsive helper functions
+  const getContainerMaxWidth = useCallback(() => {
+    switch(screenSize) {
+      case 'xs': return '100%'
+      case 'sm': return '100%'
+      case 'md': return '768px'
+      case 'lg': return '1024px'
+      case 'xl': return '1280px'
+      case 'xxl': return '1600px'
+      default: return '1280px'
+    }
+  }, [screenSize])
+
+  const getGridColumns = useCallback((maxCols = 4) => {
+    const columnMap = {
+      'xs': 1, 'sm': 2, 'md': 2, 'lg': 3, 
+      'xl': 4, 'xxl': 5, 'xxxl': 6
+    }
+    return Math.min(columnMap[screenSize] || 3, maxCols)
+  }, [screenSize])
+
+  return {
+    screenSize, windowSize,
+    isMobile: ['xs', 'sm'].includes(screenSize),
+    isTablet: screenSize === 'md',
+    isDesktop: ['lg', 'xl'].includes(screenSize),
+    getContainerMaxWidth, getGridColumns
+  }
+}
+```
+
+#### **Advanced Button Component (`Button.jsx`)**
+```javascript
+const Button = ({ 
+  children, variant = 'primary', size = 'md', 
+  disabled = false, loading = false, responsive = true,
+  ...props 
+}) => {
+  const { isMobile, isLargeScreen } = useResponsive()
+
+  // Responsive size adjustment
+  const getResponsiveSize = () => {
+    if (!responsive) return size
+    
+    if (isMobile) {
+      return size === 'xl' ? 'lg' : size === 'lg' ? 'md' : size
+    }
+    
+    if (isLargeScreen) {
+      return size === 'sm' ? 'md' : size === 'md' ? 'lg' : size
+    }
+    
+    return size
+  }
+
+  const actualSize = getResponsiveSize()
+
+  // Dynamic styling based on variant and size
+  const variantClasses = {
+    primary: `bg-gradient-to-r from-purple-500 to-blue-500 text-white
+              hover:shadow-2xl hover:shadow-purple-500/30 focus:ring-purple-500`,
+    secondary: `bg-gradient-to-r from-green-500 to-emerald-500 text-white
+                hover:shadow-2xl hover:shadow-green-500/30 focus:ring-green-500`,
+    // ... other variants
+  }
+
+  const sizeClasses = {
+    sm: `px-3 py-2 text-sm ${isMobile ? 'px-2.5 py-1.5' : ''}`,
+    md: `px-6 py-3 text-base ${isMobile ? 'px-4 py-2.5' : isLargeScreen ? 'px-7 py-3.5' : ''}`,
+    // ... other sizes
+  }
+
+  return (
+    <button
+      className={`${baseClasses} ${variantClasses[variant]} ${sizeClasses[actualSize]} ${className}`}
+      disabled={disabled || loading}
+      {...props}
+    >
+      {loading ? <LoadingContent /> : <ButtonContent />}
+    </button>
+  )
+}
+```
+
+### **State Management & Data Flow**
+
+#### **Application State Architecture**
+```javascript
+// Global state managed through React Context
+AuthContext: {
+  currentUser: User | null,
+  loading: boolean,
+  error: string,
+  methods: { login, logout, signup }
+}
+
+// Component-level state in YouTubeSummarizer
+LocalState: {
+  youtubeUrl: string,
+  isAnalyzing: boolean,
+  analysisResult: AnalysisResult | null,
+  chatHistory: Message[],
+  activeTab: 'input' | 'summary' | 'chat',
+  error: string,
+  apiStatus: APIStatus
+}
+
+// Service-level caching
+analysisCache: Map<contextId, AnalysisResult>
+```
+
+#### **Data Flow Diagram**
+```
+User Input → URL Validation → Backend API Call → YouTube API
+    ↓                                                   ↓
+UI Update ← Result Processing ← Gemini AI Analysis ← Video Data
+    ↓
+Cache Storage → Chat Context → Interactive Q&A
+```
+
+### **Error Handling & Resilience**
+
+#### **Multi-Level Error Handling**
+```javascript
+// 1. Component-level error boundaries
+<ErrorBoundary>
+  <App />
+</ErrorBoundary>
+
+// 2. Service-level error handling with retry
+const retryableErrors = ['overloaded', '503', '429', 'network', 'timeout']
+const isRetryable = error => retryableErrors.some(err => error.message.includes(err))
+
+// 3. User-friendly error messages
+const getErrorMessage = (error) => {
+  if (error.message.includes('Backend server is not available')) {
+    return 'Cannot connect to analysis server. Please check if backend is running.'
+  }
+  if (error.message.includes('quota')) {
+    return 'API quota exceeded. Please try again tomorrow.'
+  }
+  return error.message || 'An unexpected error occurred.'
+}
+
+// 4. Graceful degradation
+const fallbackAnalysis = {
+  summary: "Analysis temporarily unavailable. Please try again later.",
+  source: 'fallback_mode'
+}
+```
+
+#### **API Health Monitoring**
+```javascript
+export const checkBackendHealth = async () => {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/health`)
+    const data = await response.json()
+    
+    return {
+      available: true,
+      gemini_api: data.geminiApiKeyExists,
+      youtube_api: data.youtubeApiKeyExists,
+      features: data.features || []
+    }
+  } catch (error) {
+    return {
+      available: false,
+      error: error.message
+    }
+  }
+}
+```
+
+### **Performance Optimizations**
+
+#### **Code Splitting & Lazy Loading**
+```javascript
+// Route-based code splitting
+const YouTubeSummarizer = lazy(() => import('./components/YouTubeSummarizer'))
+const Welcome = lazy(() => import('./components/Welcome'))
+
+// Component lazy loading with Suspense
+<Suspense fallback={<LoadingScreen />}>
+  <Routes>
+    <Route path="/app" element={<YouTubeSummarizer />} />
+    <Route path="/" element={<Welcome />} />
+  </Routes>
+</Suspense>
+```
+
+#### **Memoization & Optimization**
+```javascript
+// Memoized expensive calculations
+const getResponsiveSize = useCallback(() => {
+  // Expensive responsive calculations
+}, [screenSize, responsive])
+
+// Memoized component renders
+const MemoizedButton = memo(Button, (prevProps, nextProps) => {
+  return prevProps.loading === nextProps.loading && 
+         prevProps.disabled === nextProps.disabled
+})
+
+// Virtual scrolling for large chat histories
+const VirtualizedChat = ({ messages }) => {
+  const visibleRange = useVisibleRange(messages, ITEM_HEIGHT)
+  return messages.slice(...visibleRange).map(renderMessage)
+}
+```
+
+#### **Bundle Optimization (Vite Config)**
+```javascript
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+          firebase: ['firebase/app', 'firebase/auth'],
+          ui: ['axios', '@google/generative-ai']
+        }
+      }
+    },
+    terserOptions: {
+      compress: {
+        drop_console: true,
+        drop_debugger: true
+      }
+    }
+  },
+  optimizeDeps: {
+    include: ['react', 'react-dom', 'firebase/app'],
+    exclude: ['@vite/client', '@vite/env']
+  }
+})
+```
+
+### **Security Implementation**
+
+#### **Input Validation & Sanitization**
+```javascript
+// URL validation with regex
+const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(\S+)?$/
+
+const validateYouTubeURL = (url) => {
+  if (!url || typeof url !== 'string') return false
+  return YOUTUBE_URL_REGEX.test(url.trim())
+}
+
+// XSS prevention in chat messages
+const sanitizeMessage = (message) => {
+  return message
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+}
+```
+
+#### **Authentication Security**
+```javascript
+// Firebase security rules
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /analyses/{analysisId} {
+      allow read, write: if request.auth != null && 
+        request.auth.uid == resource.data.userId;
+    }
+  }
+}
+
+// Token validation middleware
+const validateFirebaseToken = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split('Bearer ')[1]
+    const decodedToken = await admin.auth().verifyIdToken(token)
+    req.user = decodedToken
+    next()
+  } catch (error) {
+    res.status(401).json({ error: 'Unauthorized' })
+  }
+}
+```
+
+### **Testing Strategy**
+
+#### **Unit Testing Setup**
+```javascript
+// Component testing with React Testing Library
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { YouTubeSummarizer } from '../YouTubeSummarizer'
+
+describe('YouTubeSummarizer', () => {
+  test('should validate YouTube URLs correctly', () => {
+    render(<YouTubeSummarizer />)
+    const input = screen.getByPlaceholderText(/youtube url/i)
+    
+    fireEvent.change(input, { target: { value: 'invalid-url' } })
+    expect(screen.getByText(/invalid youtube url/i)).toBeInTheDocument()
+  })
+
+  test('should analyze video successfully', async () => {
+    const mockAnalyze = jest.fn().mockResolvedValue({ summary: 'Test summary' })
+    render(<YouTubeSummarizer analyzeVideo={mockAnalyze} />)
+    
+    const input = screen.getByPlaceholderText(/youtube url/i)
+    const button = screen.getByText(/analyze video/i)
+    
+    fireEvent.change(input, { target: { value: 'https://youtube.com/watch?v=test' } })
+    fireEvent.click(button)
+    
+    await waitFor(() => {
+      expect(mockAnalyze).toHaveBeenCalledWith('https://youtube.com/watch?v=test')
+    })
+  })
+})
+```
+
+#### **API Testing**
+```javascript
+// Backend API testing with Jest and Supertest
+const request = require('supertest')
+const app = require('../server')
+
+describe('POST /api/summarize', () => {
+  test('should return analysis for valid YouTube URL', async () => {
+    const response = await request(app)
+      .post('/api/summarize')
+      .send({
+        youtube_link: 'https://youtube.com/watch?v=dQw4w9WgXcQ',
+        model: 'gemini-1.5-flash'
+      })
+      .expect(200)
+
+    expect(response.body).toHaveProperty('success', true)
+    expect(response.body).toHaveProperty('summary')
+    expect(response.body).toHaveProperty('video_metadata')
+  })
+
+  test('should handle invalid URLs', async () => {
+    const response = await request(app)
+      .post('/api/summarize')
+      .send({ youtube_link: 'invalid-url' })
+      .expect(400)
+
+    expect(response.body).toHaveProperty('error', 'Invalid YouTube URL')
+  })
+})
+```
+
+### **Development Workflow**
+
+#### **Git Workflow & CI/CD**
+```yaml
+# .github/workflows/ci.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          npm install
+          cd backend && npm install
+      
+      - name: Run tests
+        run: |
+          npm run test
+          cd backend && npm test
+      
+      - name: Build application
+        run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to Netlify
+        run: netlify deploy --prod --dir=dist
+```
+
+#### **Development Scripts**
+```json
+{
+  "scripts": {
+    "dev": "concurrently --kill-others --names \"🔧BACKEND,🎨FRONTEND\" \"cd backend && npm run dev\" \"wait-on http://localhost:5000 && vite\"",
+    "dev:frontend-only": "vite",
+    "dev:backend-only": "cd backend && npm run dev", 
+    "build": "vite build",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/ --ext .js,.jsx --fix",
+    "type-check": "tsc --noEmit",
+    "health-check": "curl http://localhost:5000/api/health",
+    "setup": "cd backend && npm install && cd .. && npm install"
+  }
+}
+```
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -177,34 +955,6 @@ npm run dev:backend-only   # Backend only (port 5000)
 - Request explanations of key concepts
 - Get timestamps for important moments
 - Discuss practical applications
-
-## 🏗️ Project Structure
-
-```
-YouTube-Summarizer/
-├── 📁 backend/
-│   ├── 📄 server.js           # Express server and API routes
-│   ├── 📄 package.json        # Backend dependencies
-│   └── 📄 .env                # Backend environment variables
-├── 📁 src/
-│   ├── 📁 components/         # React components
-│   │   ├── 📄 YouTubeSummarizer.jsx
-│   │   ├── 📄 Login.jsx
-│   │   ├── 📄 Signup.jsx
-│   │   └── 📄 Welcome.jsx
-│   ├── 📁 contexts/           # React context providers
-│   │   └── 📄 AuthContext.jsx
-│   ├── 📁 services/           # API services
-│   │   ├── 📄 gemini.js       # Gemini AI integration
-│   │   └── 📄 api.js          # HTTP client setup
-│   ├── 📁 hooks/              # Custom React hooks
-│   ├── 📁 styles/             # CSS styles
-│   └── 📄 App.jsx             # Main application component
-├── 📄 package.json            # Frontend dependencies
-├── 📄 vite.config.js          # Vite configuration
-├── 📄 tailwind.config.js      # Tailwind CSS config
-└── 📄 README.md               # This file
-```
 
 ## 🔧 API Endpoints
 
@@ -317,6 +1067,14 @@ We welcome contributions! Here's how you can help:
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+### **Code Style Guidelines**
+- Use **ES6+** features and modern JavaScript
+- Follow **React Hooks** patterns, avoid class components
+- Use **functional programming** concepts where applicable
+- Implement **TypeScript** for type safety (optional but recommended)
+- Follow **atomic design** principles for components
+- Use **custom hooks** for reusable logic
+
 ### **Development Guidelines**
 - Follow existing code style
 - Add comments for complex logic
@@ -366,6 +1124,8 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 - **License**: MIT
 - **Development Time**: 3+ months
 - **Features**: 15+ core functionalities
+- **Code Quality**: ESLint + Prettier
+- **Testing**: Jest + React Testing Library
 
 ---
 
